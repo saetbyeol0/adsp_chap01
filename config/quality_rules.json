@@ -1,0 +1,8 @@
+{
+  "min_body_chars": 1000,
+  "min_citation_count": 6,
+  "banned_terms": [
+    "전문 전재",
+    "무단 복제"
+  ]
+}

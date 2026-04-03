@@ -1,0 +1,9 @@
+title: ADsP Study Blog
+description: "데이터에듀 ADsP 1과목 데이터 이해 학습노트"
+theme: minima
+lang: ko
+timezone: Asia/Seoul
+markdown: kramdown
+plugins:
+  - jekyll-feed
+show_excerpts: true

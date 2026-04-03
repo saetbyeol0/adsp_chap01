@@ -1,0 +1,16 @@
+{
+  "allowed_channel_ids": [],
+  "allowed_playlist_ids": [],
+  "allowed_title_keywords": [
+    "ADsP",
+    "1과목",
+    "데이터 이해",
+    "데이터에듀"
+  ],
+  "allowed_channel_name_keywords": [
+    "데이터에듀",
+    "dataedu"
+  ],
+  "strict_channel_match": false,
+  "strict_playlist_match": false
+}
