@@ -1,7 +1,7 @@
 
 name: Generate ADsP Post
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       youtube_url:
