@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 from openai import OpenAI
 from youtube_transcript_api import NoTranscriptFound
@@ -76,9 +78,23 @@ def get_playlist_id(url: str) -> str | None:
 
 
 def fetch_video_metadata(url: str) -> dict[str, Any]:
-    with YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return info
+    # Avoid yt-dlp for metadata in CI: YouTube often blocks unauthenticated scraping ("confirm you're not a bot").
+    # oEmbed is lightweight and usually accessible without cookies.
+    oembed_url = f"https://www.youtube.com/oembed?format=json&url={quote(url, safe='')}"
+    request = Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=20) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    title = data.get("title") or "ADsP 학습 영상"
+    channel = data.get("author_name") or "Unknown Channel"
+    return {
+        "title": title,
+        "channel": channel,
+        "uploader": channel,
+        "webpage_url": url,
+        "playlist_title": None,
+        "channel_id": None,
+    }
 
 
 def validate_whitelist(url: str, metadata: dict[str, Any], whitelist: dict[str, Any]) -> None:
@@ -129,11 +145,10 @@ class TranscriptChunk:
 
 
 def get_transcript_from_youtube(video_id: str) -> list[TranscriptChunk]:
-    api = YouTubeTranscriptApi()
-    transcript = api.fetch(video_id, languages=["ko", "en"])
+    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["ko", "en"])
     chunks: list[TranscriptChunk] = []
     for entry in transcript:
-        chunks.append(TranscriptChunk(start=float(entry.start), text=str(entry.text).strip()))
+        chunks.append(TranscriptChunk(start=float(entry.get("start", 0)), text=str(entry.get("text", "")).strip()))
     return chunks
 
 
@@ -177,6 +192,8 @@ def collect_transcript(url: str, client: OpenAI) -> list[TranscriptChunk]:
     try:
         return get_transcript_from_youtube(video_id)
     except (NoTranscriptFound, TranscriptsDisabled, RuntimeError, ValueError):
+        if os.getenv("DISABLE_WHISPER", "false").lower() == "true":
+            raise
         return get_transcript_via_whisper(url, client)
 
 
