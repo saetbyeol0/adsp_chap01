@@ -7,3 +7,10 @@ markdown: kramdown
 plugins:
   - jekyll-feed
 show_excerpts: true
+
+defaults:
+  - scope:
+      path: ""
+      type: posts
+    values:
+      layout: post
