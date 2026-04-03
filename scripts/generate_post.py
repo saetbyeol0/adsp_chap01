@@ -29,6 +29,7 @@ CONFIG_DIR = ROOT_DIR / "config"
 POSTS_DIR = ROOT_DIR / "_posts"
 DRAFTS_DIR = ROOT_DIR / "_drafts"
 IMAGES_DIR = ROOT_DIR / "assets" / "images"
+TRANSCRIPTS_DIR = ROOT_DIR / "transcripts"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -40,6 +41,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate ADsP blog post from a YouTube URL.")
     parser.add_argument("--youtube-url", required=True, help="Target YouTube URL")
     parser.add_argument("--publish", default="false", choices=["true", "false"], help="Whether to publish into _posts")
+    parser.add_argument("--series", default="", help='Series name (e.g. "ADsP 1과목 데이터 이해"). Optional.')
+    parser.add_argument("--chapter-id", default="", help='Chapter id for TOC grouping (e.g. "ch01"). Optional.')
+    parser.add_argument("--lecture-index", default="", help="Lecture index for ordering (e.g. 1). Optional.")
     parser.add_argument("--whitelist-config", default=str(CONFIG_DIR / "whitelist.json"))
     parser.add_argument("--quality-config", default=str(CONFIG_DIR / "quality_rules.json"))
     return parser.parse_args()
@@ -69,12 +73,59 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Unsupported YouTube URL format.")
 
 
+def load_cached_transcript(video_id: str) -> list["TranscriptChunk"] | None:
+    path = TRANSCRIPTS_DIR / f"{video_id}.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    chunks: list[TranscriptChunk] = []
+    for item in data:
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        chunks.append(TranscriptChunk(start=float(item.get("start", 0) or 0), text=text))
+    return chunks or None
+
+
+def save_cached_transcript(video_id: str, chunks: list["TranscriptChunk"]) -> None:
+    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    payload = [{"start": c.start, "text": c.text} for c in chunks]
+    (TRANSCRIPTS_DIR / f"{video_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def get_playlist_id(url: str) -> str | None:
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
     if "list" in query:
         return query["list"][0]
     return None
+
+
+def get_playlist_index(url: str) -> int | None:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    raw = query.get("index", [None])[0]
+    if not raw:
+        return None
+    try:
+        value = int(str(raw))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def parse_int_maybe(value: str) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
 
 
 def fetch_video_metadata(url: str) -> dict[str, Any]:
@@ -197,11 +248,24 @@ def get_transcript_via_whisper(url: str, client: OpenAI) -> list[TranscriptChunk
 
 def collect_transcript(url: str, client: OpenAI) -> list[TranscriptChunk]:
     video_id = extract_video_id(url)
+    cached = load_cached_transcript(video_id)
+    if cached:
+        return cached
+
     try:
-        return get_transcript_from_youtube(video_id)
+        chunks = get_transcript_from_youtube(video_id)
+        # Cache for repeat runs (useful when running outside Actions).
+        if os.getenv("DISABLE_TRANSCRIPT_CACHE", "false").lower() != "true":
+            save_cached_transcript(video_id, chunks)
+        return chunks
     except (NoTranscriptFound, TranscriptsDisabled, RuntimeError, ValueError):
         if os.getenv("DISABLE_WHISPER", "false").lower() == "true":
-            raise
+            raise RuntimeError(
+                "Transcript retrieval failed and Whisper fallback is disabled. "
+                "On GitHub Actions, YouTube often blocks transcript requests from cloud IPs. "
+                "Workaround: run `py scripts/fetch_transcript_local.py --youtube-url <URL>` on your PC, "
+                "commit the generated `transcripts/<video_id>.json`, then rerun the workflow."
+            )
         return get_transcript_via_whisper(url, client)
 
 
@@ -267,8 +331,9 @@ def generate_markdown_summary(client: OpenAI, title: str, channel: str, source_u
 
 def generate_image(client: OpenAI, title: str, slug: str) -> str:
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    date_str = datetime.now().strftime("%Y%m%d")
-    image_filename = f"{date_str}-{slug}.png"
+    # Use a stable filename by video_id when available so regeneration overwrites instead of duplicating.
+    # slug is expected to already include video_id when we call this function.
+    image_filename = f"{slug}.png"
     output_path = IMAGES_DIR / image_filename
 
     image_prompt = (
@@ -293,30 +358,50 @@ def render_post_markdown(
     source_playlist: str,
     image_path: str,
     body_markdown: str,
+    lecture_index: int | None,
+    chapter_id: str,
+    series_name: str,
+    video_id: str,
 ) -> str:
     date_str = datetime.now().isoformat(timespec="seconds")
+    lecture_index_line = f"\nlecture_index: {lecture_index}" if lecture_index else ""
+    chapter_line = f'\nchapter_id: "{chapter_id}"' if chapter_id else ""
     front_matter = f"""---
+layout: post
 title: "{title}"
 date: {date_str}
 tags: ["ADsP", "데이터이해", "데이터에듀"]
 source_url: "{source_url}"
 source_channel: "{source_channel}"
 source_playlist: "{source_playlist}"
+source_video_id: "{video_id}"
 generated_image: "{image_path}"
 ai_generated: true
+series: "{series_name}"{lecture_index_line}{chapter_line}
 ---
 """
     ai_notice = "\n> 이 글은 AI 보조로 생성되었으며, 원본 영상 학습 내용을 요약한 자료입니다.\n"
-    hero = f"\n![대표 이미지]({image_path})\n"
+    # Use Jekyll's relative_url so project pages baseurl works (e.g. /<repo>/...).
+    hero = "\n![대표 이미지]({{ page.generated_image | relative_url }})\n"
     return front_matter + hero + ai_notice + "\n" + body_markdown.strip() + "\n"
 
 
-def write_post_file(markdown: str, title: str, publish: bool) -> Path:
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    slug = slugify(title)
+def write_post_file(markdown: str, title: str, publish: bool, video_id: str, chapter_id: str, lecture_index: int | None) -> Path:
     target_dir = POSTS_DIR if publish else DRAFTS_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
-    path = target_dir / f"{date_str}-{slug}.md"
+
+    # Prefer overwriting an existing post for the same video_id to make regeneration idempotent.
+    existing = next(iter(target_dir.glob(f"*-{video_id}.md")), None)
+    if existing:
+        existing.write_text(markdown, encoding="utf-8")
+        return existing
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    slug = slugify(title)
+    prefix = f"{chapter_id}-" if chapter_id else ""
+    index_part = f"{lecture_index:02}-" if lecture_index else ""
+    filename = f"{date_str}-{prefix}{index_part}{slug}-{video_id}.md"
+    path = target_dir / filename
     path.write_text(markdown, encoding="utf-8")
     return path
 
@@ -328,6 +413,7 @@ def main() -> None:
     quality_cfg = load_json(Path(args.quality_config))
 
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    video_id = extract_video_id(args.youtube_url)
     metadata = fetch_video_metadata(args.youtube_url)
     validate_whitelist(args.youtube_url, metadata, whitelist)
 
@@ -340,9 +426,13 @@ def main() -> None:
     channel = metadata.get("channel", metadata.get("uploader", "Unknown Channel"))
     playlist = metadata.get("playlist_title", "ADsP 1과목 데이터 이해")
     source_url = metadata.get("webpage_url", args.youtube_url)
+    lecture_index = parse_int_maybe(args.lecture_index) or get_playlist_index(args.youtube_url)
+    series_name = (args.series or "").strip() or playlist or "ADsP"
+    chapter_id = (args.chapter_id or "").strip()
 
     body_markdown = generate_markdown_summary(client, title, channel, source_url, transcript_for_prompt)
-    image_slug = slugify(title)
+    # Use stable image filename keyed by video_id to make regeneration idempotent.
+    image_slug = f"{video_id}"
     image_path = generate_image(client, title, image_slug)
 
     report = validate_markdown(
@@ -361,8 +451,19 @@ def main() -> None:
         source_playlist=playlist,
         image_path=image_path,
         body_markdown=body_markdown,
+        lecture_index=lecture_index,
+        chapter_id=chapter_id,
+        series_name=series_name,
+        video_id=video_id,
     )
-    target_path = write_post_file(post_markdown, title, publish=publish)
+    target_path = write_post_file(
+        post_markdown,
+        title,
+        publish=publish,
+        video_id=video_id,
+        chapter_id=chapter_id,
+        lecture_index=lecture_index,
+    )
     print(f"Generated post: {target_path}")
     print(f"Generated image: {image_path}")
 
