@@ -1,0 +1,16 @@
+- id: ch01
+  title: "1과목 데이터 이해"
+  series: "ADsP 1과목 데이터 이해"
+  order: 1
+- id: ch02
+  title: "2과목 데이터 분석 기획"
+  series: "ADsP 2과목 데이터 분석 기획"
+  order: 2
+- id: ch03
+  title: "3과목 데이터 분석"
+  series: "ADsP 3과목 데이터 분석"
+  order: 3
+- id: ch04
+  title: "4과목 (추가)"
+  series: "ADsP 4과목"
+  order: 4
