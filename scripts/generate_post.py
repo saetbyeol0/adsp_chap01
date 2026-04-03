@@ -145,10 +145,18 @@ class TranscriptChunk:
 
 
 def get_transcript_from_youtube(video_id: str) -> list[TranscriptChunk]:
-    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["ko", "en"])
+    api = YouTubeTranscriptApi()
+    transcript = api.fetch(video_id, languages=["ko", "en"])
     chunks: list[TranscriptChunk] = []
     for entry in transcript:
-        chunks.append(TranscriptChunk(start=float(entry.get("start", 0)), text=str(entry.get("text", "")).strip()))
+        if isinstance(entry, dict):
+            start = float(entry.get("start", 0) or 0)
+            text = str(entry.get("text", "")).strip()
+        else:
+            start = float(getattr(entry, "start", 0) or 0)
+            text = str(getattr(entry, "text", "")).strip()
+        if text:
+            chunks.append(TranscriptChunk(start=start, text=text))
     return chunks
 
 
